@@ -514,7 +514,10 @@ def normalize_columns(x):
   #                    TODO: Implement this function                          #
   #############################################################################
   # Replace "pass" statement with your code
-  pass
+  y = x.clone()
+  mean_y = y.sum(dim=0)/y.shape[0]
+  sigma_y = (((y-mean_y)**2).sum(dim=0)/(y.shape[0]-1))**(1/2)
+  y = (x - mean_y) / sigma_y
   #############################################################################
   #                            END OF YOUR CODE                               #
   #############################################################################
