@@ -61,7 +61,7 @@ def compute_distances_two_loops(x_train, x_test):
   # Replace "pass" statement with your code
   for i in range(num_train):
     for j in range(num_test):
-      dists[i,j] = (x_train[i].flatten() - x_test[j].flatten()).pow(2).sum().sqrt()
+      dists[i,j] = (x_train[i] - x_test[j]).pow(2).sum().sqrt()
   ##############################################################################
   #                             END OF YOUR CODE                               #
   ##############################################################################
@@ -105,9 +105,7 @@ def compute_distances_one_loop(x_train, x_test):
   ##############################################################################
   # Replace "pass" statement with your code
   for i in range(num_train):
-    train_sample = x_train[i].flatten()
-    dists[i,:] = (train_sample - x_test.view(num_test,train_sample.shape[0])).pow(2).sum(dim=1).sqrt()
-
+    dists[i] = (x_train[i] - x_test).pow(2).sum(dim=(1,2,3)).sqrt()
   ##############################################################################
   #                             END OF YOUR CODE                               #
   ##############################################################################
@@ -156,15 +154,17 @@ def compute_distances_no_loops(x_train, x_test):
   #       and a matrix multiply.                                               #
   ##############################################################################
   # Replace "pass" statement with your code
-  C, H, W = x_train.shape[1], x_train.shape[2], x_train.shape[3]
-  x_train = x_train.view(num_train, C*H*W)
-  x_test = x_test.view(num_test, C*H*W)
+  
+  # flatten train and test matrix
+  x_train_reshape = x_train.reshape(num_train, -1)
+  x_test_reshape = x_test.reshape(num_test, -1)
 
-  add_1 = (x_train.mm(x_train.t()).diag()).view(-1, 1)
-  add_2 = 2 * x_train.mm(x_test.t())
-  add_3 = (x_test.mm(x_test.t()).diag())
+  # matrix multiply
+  x_mm_2 = x_train_reshape.mm(x_test_reshape.T) * 2
 
-  dists = (add_1 - add_2 + add_3).sqrt()
+  # calculate the result
+  dists = (x_train_reshape.pow(2).sum(dim=1).reshape(-1, 1) - x_mm_2 + 
+           x_test_reshape.pow(2).sum(dim=1).reshape(1, -1)).sqrt()
   ##############################################################################
   #                             END OF YOUR CODE                               #
   ##############################################################################
@@ -213,7 +213,6 @@ def predict_labels(dists, y_train, k=1):
         max_count = counts[i]
         idx_max_count = i
     y_pred[j] = classes[idx_max_count]
-
   ##############################################################################
   #                             END OF YOUR CODE                               #
   ##############################################################################
@@ -361,7 +360,6 @@ def knn_cross_validate(x_train, y_train, num_folds=5, k_choices=None):
       k_results.append(classifier.check_accuracy(x_Test,y_Test,k=k))
     
     k_to_accuracies[k] = k_results
-
   ##############################################################################
   #                            END OF YOUR CODE                                #
   ##############################################################################
