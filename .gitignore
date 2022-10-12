@@ -2,7 +2,6 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.pt
 
 # C extensions
 *.so
@@ -129,3 +128,6 @@ cython_debug/
 
 # UM files for assignment upload
 eecs598/
+
+# Datasets
+cifar-10*
