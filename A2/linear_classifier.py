@@ -230,7 +230,7 @@ def sample_batch(X, y, num_train, batch_size):
   # Hint: Use torch.randint to generate indices.                          #
   #########################################################################
   # Replace "pass" statement with your code
-  indices = torch.randint(low=0,high=batch_size,size=(batch_size,))
+  indices = torch.randint(num_train, (batch_size,))
   X_batch = X[indices]
   y_batch = y[indices]
   #########################################################################
@@ -347,8 +347,8 @@ def svm_get_search_params():
   # TODO:   add your own hyper parameter lists.                             #
   ###########################################################################
   # Replace "pass" statement with your code
-  learning_rates = [1e-2]
-  regularization_strengths = torch.logspace(-0.03,-0.02,50)
+  learning_rates = torch.linspace(1e-2, 2e-1, 5)
+  regularization_strengths = torch.logspace(-0.03,-0.02, 5)
   ###########################################################################
   #                           END OF YOUR CODE                              #
   ###########################################################################
@@ -441,7 +441,37 @@ def softmax_loss_naive(W, X, y, reg):
   # regularization!                                                           #
   #############################################################################
   # Replace "pass" statement with your code
-  pass
+  
+  # get number of classes and number of training examples
+  num_classes = W.shape[1]
+  num_train = X.shape[0]
+    
+  # computer scores and get correct class score
+  scores = W.t().mv(X[0])
+  correct_class_score = scores[y[0]]
+
+  # for each training exemplars 
+  for i in range(num_train):
+    # calculate loss for exemplar
+    scores = W.t().mv(X[i])
+    scores = scores - scores.max()
+    correct_class_score = scores[y[i]]
+    loss += torch.log(torch.exp(scores).sum()) - correct_class_score
+    
+    # add calculated delta to class delta (dW[:, j])
+    for j in range(num_classes):
+      if j == y[i]:
+        dW[:, j] += torch.exp(scores[j]) / torch.exp(scores).sum() * X[i, :] - X[i, :]
+      else:
+        dW[:, j] += torch.exp(scores[j]) / torch.exp(scores).sum() * X[i, :]
+  
+  # regulate loss
+  loss /= num_train
+  loss += reg * torch.sum(W * W)
+
+  # regulate dW
+  dW /= num_train
+  dW += 2 * reg * W
   #############################################################################
   #                          END OF YOUR CODE                                 #
   #############################################################################
@@ -469,7 +499,37 @@ def softmax_loss_vectorized(W, X, y, reg):
   # regularization!                                                           #
   #############################################################################
   # Replace "pass" statement with your code
-  pass
+
+  # get number of classes and training examples
+  num_classes = W.shape[1]
+  num_train = X.shape[0]
+
+  # calculate scores and max
+  scores = X.mm(W)
+  val, _  = scores.max(dim = 1)
+  scores = scores-val.view(-1,1)
+
+  # exponentiate scores, calculate sum and log of sum
+  exp_scores = scores.exp()
+  exp_scores_sum = exp_scores.sum(dim = 1)
+  exp_scores_sum_log = exp_scores_sum.log()
+  correct_class_scores = scores[range(num_train), y]
+
+  # caulculate loss
+  loss = (exp_scores_sum_log - correct_class_scores).sum()
+
+  # create mask to block values of incorrect classes for each training example
+  mask = torch.zeros((num_train,num_classes), dtype=torch.float64, device = 'cuda')
+  mask[range(num_train), y] = -1
+  minus_X = mask.t().mm(X)
+
+  # caulculate dW
+  dW += minus_X.t()
+  dW += ((exp_scores/exp_scores_sum.view(-1,1)).t().mm(X)).t()
+
+  # calculate and regulate loss
+  loss /= num_train
+  loss += reg * torch.sum(W * W)
   #############################################################################
   #                          END OF YOUR CODE                                 #
   #############################################################################
@@ -498,7 +558,8 @@ def softmax_get_search_params():
   # classifier.                                                             #
   ###########################################################################
   # Replace "pass" statement with your code
-  pass
+  learning_rates = torch.linspace(1e-2, 2e-1, 4)
+  regularization_strengths = torch.logspace(1e-4, 1e-3, 6)
   ###########################################################################
   #                           END OF YOUR CODE                              #
   ###########################################################################

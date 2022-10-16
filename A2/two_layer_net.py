@@ -116,7 +116,10 @@ def nn_forward_pass(params, X):
     # shape (N, C).                                                            #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    hidden = X.mm(W1) + b1
+    hidden[hidden < 0] = 0 # remove all negative score from hidden layer
+
+    scores = hidden.mm(W2) + b2
     ###########################################################################
     #                             END OF YOUR CODE                            #
     ###########################################################################
@@ -176,7 +179,17 @@ def nn_forward_backward(params, X, y=None, reg=0.0):
     # (Check Numeric Stability in http://cs231n.github.io/linear-classify/).   #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    # Forward pass
+    logits = scores - scores.max(dim=1, keepdim=True).values
+    logits_exp_sum = logits.exp().sum(dim=1, keepdim=True) 
+
+    # Forward pass class probabilities
+    log_probs = logits - logits_exp_sum.log()
+    probs = log_probs.exp()
+
+    # Calculate loss
+    loss = (-1.0 / N) * log_probs[torch.arange(N), y].sum()
+    loss += reg * (torch.sum(W1 * W1) + torch.sum(W2 * W2))
     ###########################################################################
     #                             END OF YOUR CODE                            #
     ###########################################################################
@@ -190,7 +203,21 @@ def nn_forward_backward(params, X, y=None, reg=0.0):
     # tensor of same size                                                     #
     ###########################################################################
     # Replace "pass" statement with your code
-    pass
+    class_scores = probs.clone()
+    class_scores[torch.arange(N), y] -= 1
+    class_scores /= N
+
+    # Calculate gradients on score output weights and bias
+    grads['W2'] = h1.t().mm(class_scores) + 2 * W2 * reg
+    grads['b2'] = class_scores.sum(dim=0)
+
+
+    delta_hidden_1 = class_scores.mm(W2.T)
+    delta_hidden_1[h1 == 0] = 0
+
+    # Calculate gradients on first hidden layer
+    grads['W1'] = X.t().mm(delta_hidden_1) + 2 * W1 * reg
+    grads['b1'] = delta_hidden_1.sum(dim=0)
     ###########################################################################
     #                             END OF YOUR CODE                            #
     ###########################################################################
@@ -260,7 +287,11 @@ def nn_train(params, loss_func, pred_func, X, y, X_val, y_val,
     # stored in the grads dictionary defined above.                         #
     #########################################################################
     # Replace "pass" statement with your code
-    pass
+    # Update parameters with negative gradient * learning rate
+    params['W1'] -= grads['W1'] * learning_rate
+    params['W2'] -= grads['W2'] * learning_rate
+    params['b1'] -= grads['b1'] * learning_rate
+    params['b2'] -= grads['b2'] * learning_rate
     #########################################################################
     #                             END OF YOUR CODE                          #
     #########################################################################
@@ -316,7 +347,8 @@ def nn_predict(params, loss_func, X):
   # TODO: Implement this function; it should be VERY simple!                #
   ###########################################################################
   # Replace "pass" statement with your code
-  pass
+  scores, _ = nn_forward_pass(params, X)
+  _, y_pred = scores.max(dim=1) # get predicted class index
   ###########################################################################
   #                              END OF YOUR CODE                           #
   ###########################################################################
@@ -351,7 +383,9 @@ def nn_get_search_params():
   # classifier.                                                             #
   ###########################################################################
   # Replace "pass" statement with your code
-  pass
+  learning_rates = torch.logspace(-4, 2, 4).tolist()
+  hidden_sizes = torch.logspace(1, 7, 4, base=2, dtype=torch.int32).tolist()
+  regularization_strengths = torch.logspace(-5, -1, 5).tolist()
   ###########################################################################
   #                           END OF YOUR CODE                              #
   ###########################################################################
@@ -405,7 +439,23 @@ def find_best_net(data_dict, get_param_set_fn):
   # automatically like we did on the previous exercises.                      #
   #############################################################################
   # Replace "pass" statement with your code
-  pass
+  learning_rates, hidden_sizes, regularization_strengths, learning_rate_decays = get_param_set_fn() 
+  
+  for reg in regularization_strengths:
+    for lr in learning_rates:
+      for hs in hidden_sizes:
+        print('train with hidden_size: {}'.format(hs))
+        print('train with learning_rate: {}'.format(lr))
+        print('train with regularization: {}'.format(reg))
+        net = TwoLayerNet(3 * 32 * 32, hs, 10, device=data_dict['X_train'].device, dtype=data_dict['X_train'].dtype)
+        stats = net.train(data_dict['X_train'], data_dict['y_train'], data_dict['X_val'], data_dict['y_val'],
+                  num_iters=3000, batch_size=1000,
+                  learning_rate=lr, learning_rate_decay=0.95,
+                  reg=reg, verbose=False)
+        if max(stats['val_acc_history']) > best_val_acc:
+          best_val_acc = max(stats['val_acc_history'])
+          best_net = net
+          best_stat = stats
   #############################################################################
   #                               END OF YOUR CODE                            #
   #############################################################################
