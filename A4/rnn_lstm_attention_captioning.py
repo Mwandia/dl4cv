@@ -457,9 +457,15 @@ class CaptioningRNN(nn.Module):
         #       feature and pooling=False to get the CNN activation map.         #
         ##########################################################################
         self.vocab_size = vocab_size
+        self.feature_extrator = FeatureExtractor(pooling=cell_type!='attention', device=device, dtype=dtype)
 
-        self.h0_linear = nn.Linear(input_dim, hidden_dim, device=device, dtype=dtype)
-        self.w_emb = WordEmbedding(self.vocab_size, wordvec_dim, device=device, dtype=dtype)
+        if self.cell_type in ['rnn', 'lstm']:
+          self.feature_projector = nn.Linear(1280, hidden_dim).to(device, dtype)
+        else: # 'attention'.
+          # Transform a tensor of shape (N, 1280, 4, 4) to (N, H, 4, 4).
+          self.feature_projector = nn.Linear(1280, hidden_dim).to(device, dtype)      
+        
+        self.word_embed = WordEmbedding(self.vocab_size, wordvec_dim, device=device, dtype=dtype)
         
         if cell_type == 'rnn':
           self.rnn = RNN(wordvec_dim, hidden_dim, device=device, dtype=dtype)
@@ -520,21 +526,30 @@ class CaptioningRNN(nn.Module):
         # Replace "pass" statement with your code
         # Get features and transform to initial hidden state
         h0 = None
-        pooling = False if self.cell_type == "attention" else True
 
-        fe = FeatureExtractor(pooling=pooling, device=images.device, dtype=images.dtype)
-        features = fe.extract_mobilenet_feature(images)
+        # print('=' * 50)
+        # print('CaptioningRNN.forward')
+        features = self.feature_extrator.extract_mobilenet_feature(images)
+        # print('number of examples: ', images.shape[0])
+        # print('image shape: ', images.shape)
+        # print('features shape: ', features.shape)
 
         if self.cell_type == "attention":
           features = features.permute(0, 2, 3, 1)
-          h0 = self.h0_linear(features) 
+          # print('features permute shape: ', features.shape)
+          h0 = self.feature_projector(features)
+          # print('hidden layer shape: ', h0.shape) 
           h0 = h0.permute(0, 3, 1, 2)
         else:
-          h0 = self.h0_linear(features) # N X H
+          h0 = self.feature_projector(features)
 
-        rnn_x = self.w_emb(captions_in) # N X T X W
-        hl = self.rnn(rnn_x, h0)
-        scores = self.scores_linear(hl)
+        # print('hidden layer permute shape: ', h0.shape)
+        word_embeddings = self.word_embed(captions_in)
+        # print('word embeddings shape: ', word_embeddings.shape)
+        # print('=' * 50)
+
+        hidden_scores = self.rnn(word_embeddings, h0)
+        scores = self.scores_linear(hidden_scores)
         loss = temporal_softmax_loss(scores, captions_out, ignore_index=self.ignore_index)
         ############################################################################
         #                             END OF YOUR CODE                             #
@@ -601,41 +616,38 @@ class CaptioningRNN(nn.Module):
         ###########################################################################
         # Replace "pass" statement with your code
         h0 = prev_h = prev_c = attn_weights = A = None
-        V = self.vocab_size
-        pooling = False if self.cell_type == "attention" else True
 
-        fe = FeatureExtractor(pooling=pooling, device="cuda", dtype=images.dtype)
-        features = fe.extract_mobilenet_feature(images)
+        features = self.feature_extrator.extract_mobilenet_feature(images)
 
         if self.cell_type == "attention":
           features = features.permute(0, 2, 3, 1)
-          A = self.h0_linear(features)
+          A = self.feature_projector(features)
           A = A.permute(0, 3, 1, 2)
           h0 = A.mean(dim=(2, 3)) 
           prev_h = h0
           prev_c = h0
         else:
-          h0 = self.h0_linear(features)
+          h0 = self.feature_projector(features)
           prev_h = h0
           prev_c = torch.zeros_like(h0) 
 
         current_x = self._start * torch.ones(N).type(torch.long).to(device="cuda")
         for t in range(max_length):
-          rnn_x = self.w_emb(current_x)
+          rnn_x = self.word_embed(current_x)
 
           if self.cell_type == "rnn":
-            prev_h, _ = rnn_step_forward(rnn_x, prev_h, self.rnn.Wx, self.rnn.Wh, self.rnn.b)
+            prev_h = self.rnn.step_forward(rnn_x, prev_h)
           elif self.cell_type == "lstm":
-            prev_h, prev_c = lstm_step_forward(rnn_x, prev_h, prev_c, self.rnn.Wx, self.rnn.Wh, self.rnn.b)
+            prev_h, prev_c = self.rnn.step_forward(rnn_x, prev_h, prev_c)
           else:
-            attn, attn_weights = dot_product_attention(prev_h, A)
-            prev_h, prev_c = lstm_step_forward(rnn_x, prev_h, prev_c, self.rnn.Wx, self.rnn.Wh, self.rnn.b, attn, self.rnn.Wattn)
-
+            _, attn_weights = dot_product_attention(prev_h, A)
+            prev_h, prev_c = self.rnn.step_forward(rnn_x, prev_h, prev_c)
+            attn_weights_all[:, t] = attn_weights
+            
           scores = self.scores_linear(prev_h)
           _, current_x = torch.max(scores, 1) 
           
           captions[:, t] = current_x
-          attn_weights_all[:, t] = attn_weights
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -676,7 +688,20 @@ def lstm_step_forward(x, prev_h, prev_c, Wx, Wh, b, attn=None, Wattn=None):
     # You may want to use torch.sigmoid() for the sigmoid function.             #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    _, H = prev_h.shape # N X H
+    x_term = x.mm(Wx)
+    h_term = prev_h.mm(Wh)
+
+    attention_term = torch.zeros_like(h_term)
+    if attn is not None and Wattn is not None:
+      attention_term = attn.mm(Wattn) # N X 4 H
+
+    i = torch.sigmoid(h_term[:, :H] + x_term[:, :H] + attention_term[:, :H] + b[:H])
+    f = torch.sigmoid(h_term[:, H:H*2] + x_term[:, H:H*2] + attention_term[:, H:H*2] + b[H:H*2])
+    o = torch.sigmoid(h_term[:, H*2:H*3] + x_term[:, H*2:H*3] + attention_term[:, H*2:H*3] + b[H*2:H*3])
+    g = torch.tanh(h_term[:, H*3:] + x_term[:, H*3:] + attention_term[:, H*3:] + b[H*3:])
+    next_c = f * prev_c + i * g
+    next_h = o * torch.tanh(next_c)
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -712,7 +737,14 @@ def lstm_forward(x, h0, Wx, Wh, b):
     # You should use the lstm_step_forward function that you just defined.       #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    prev_h = h0
+    prev_c = c0
+    N, T, _ = x.shape
+    H, H = prev_h.shape
+    h = torch.zeros((N, T, H), dtype=h0.dtype, device=h0.device)
+    for t in range(T):
+      prev_h, prev_c = lstm_step_forward(x[:, t, :], prev_h, prev_c, Wx, Wh, b)
+      h[:, t, :] = prev_h
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -800,7 +832,14 @@ def dot_product_attention(prev_h, A):
     # HINT: Make sure you reshape attn_weights back to (N, 4, 4)!               #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    N, H = prev_h.shape
+    prev_h_d = prev_h.reshape(*prev_h.shape, 1)
+    A_t = A.flatten(start_dim=2)
+    scale = torch.sqrt(torch.tensor(H))
+    attn_weights_t = (prev_h_d * A_t).sum(dim=1) / scale
+    attn_weights_t = nn.functional.softmax(attn_weights_t, dim=1)
+    attn = (A_t * attn_weights_t.reshape(N, 1, 16)).sum(dim=2)
+    attn_weights = attn_weights_t.reshape(N, 4, 4) 
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -849,7 +888,15 @@ def attention_forward(x, A, Wx, Wh, Wattn, b):
     # function that you just defined.                                           #
     #############################################################################
     # Replace "pass" statement with your code
-    pass
+    prev_h = h0
+    prev_c = c0
+    N, T, _ = x.shape
+    H, H = prev_h.shape
+    h = torch.zeros((N, T, H)).type(h0.dtype).to(h0.device)
+    for t in range(T):
+      attn, _ = dot_product_attention(prev_h, A)
+      prev_h, prev_c = lstm_step_forward(x[:, t, :], prev_h, prev_c, Wx, Wh, b, attn, Wattn)
+      h[:, t, :] = prev_h
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
