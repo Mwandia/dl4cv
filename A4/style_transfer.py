@@ -31,7 +31,7 @@ def content_loss(content_weight, content_current, content_original):
     # TODO: Compute the content loss for style transfer.                         #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    return content_weight * ((content_current - content_original).pow(2)).sum()
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -57,7 +57,13 @@ def gram_matrix(features, normalize=True):
     # Don't forget to implement for both normalized and non-normalized version   #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    N, C, H, W = features.shape
+
+    features = features.reshape(N, C, -1)
+    gram = torch.bmm(features,features.permute(0, 2, 1))
+
+    if normalize:
+      gram /= N*C*W*H
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -89,7 +95,12 @@ def style_loss(feats, style_layers, style_targets, style_weights):
     # You will need to use your gram_matrix function.                            #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    loss = 0
+    for idx, layer in enumerate(style_layers):
+        gram = gram_matrix(feats[layer])
+        loss += style_weights[idx] * ((gram - style_targets[idx]).pow(2)).sum()
+
+    return loss
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -112,7 +123,12 @@ def tv_loss(img, tv_weight):
     # Your implementation should be vectorized and not require any loops!        #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    sumh = torch.sum((img[..., 1:, :] - img[..., :-1, :]) ** 2)
+    sumw = torch.sum((img[..., 1:] - img[..., :-1]) ** 2)
+    
+    loss = tv_weight * (sumh + sumw)
+
+    return loss
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
