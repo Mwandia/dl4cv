@@ -640,8 +640,8 @@ class CaptioningRNN(nn.Module):
           elif self.cell_type == "lstm":
             prev_h, prev_c = self.rnn.step_forward(rnn_x, prev_h, prev_c)
           else:
-            _, attn_weights = dot_product_attention(prev_h, A)
-            prev_h, prev_c = self.rnn.step_forward(rnn_x, prev_h, prev_c)
+            attn, attn_weights = dot_product_attention(prev_h, A)
+            prev_h, prev_c = self.rnn.step_forward(rnn_x, prev_h, prev_c, attn)
             attn_weights_all[:, t] = attn_weights
             
           scores = self.scores_linear(prev_h)
