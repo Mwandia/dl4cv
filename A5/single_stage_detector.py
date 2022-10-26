@@ -38,7 +38,26 @@ def GenerateAnchor(anc, grid):
   # generate all the anchor coordinates for each image. Support batch input.   #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  anchors = []
+
+  Hp, Wp = grid.shape[1], grid.shape[2]
+  A = anc.shape[0]
+
+  for curr_grid in grid:
+    curr_grid_anc = torch.zeros((A, Hp, Wp, 4))
+
+    for line, curr_gridl in enumerate(curr_grid):
+      for col, curr_gridc in enumerate(curr_gridl):
+        x, y = curr_gridc[0].item(), curr_gridc[1].item()
+        for idx_anc, curr_anc in enumerate(anc):
+          anc_h, anc_w = curr_anc[0], curr_anc[1]
+          x_tl, y_tl = (x - anc_h / 2), (y - anc_w / 2)
+          x_br, y_br = (x + anc_h / 2), (y + anc_w / 2)
+
+          curr_grid_anc[idx_anc, line, col] = torch.tensor((x_tl, y_tl, x_br, y_br))
+    anchors.append(curr_grid_anc)
+
+  anchors = torch.stack(anchors).cuda()
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
@@ -74,7 +93,27 @@ def GenerateProposal(anchors, offsets, method='YOLO'):
   # compute the proposal coordinates using the transformation formulas above.  #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  center_anchors = torch.zeros_like(anchors)
+  center_anchors[..., 0] = (anchors[..., 0] + anchors[..., 2]) / 2
+  center_anchors[..., 1] = (anchors[..., 1] + anchors[..., 3]) / 2
+  center_anchors[..., 2] = anchors[..., 2] - anchors[..., 0]
+  center_anchors[..., 3] = anchors[..., 3] - anchors[..., 1]
+
+  if method == 'YOLO':
+    center_anchors[..., 0] += offsets[..., 0]
+    center_anchors[..., 1] += offsets[..., 1]
+  else:
+    center_anchors[..., 0] += (offsets[..., 0] * center_anchors[..., 2]).detach()
+    center_anchors[..., 1] += (offsets[..., 1] * center_anchors[..., 3]).detach()
+
+  center_anchors[..., 2] *= torch.exp(offsets[..., 2])
+  center_anchors[..., 3] *= torch.exp(offsets[..., 3])
+
+  proposals = torch.zeros_like(center_anchors)
+  proposals[..., 0] = center_anchors[..., 0] - center_anchors[..., 2] / 2 
+  proposals[..., 1] = center_anchors[..., 1] - center_anchors[..., 3] / 2
+  proposals[..., 2] = center_anchors[..., 0] + center_anchors[..., 2] / 2
+  proposals[..., 3] = center_anchors[..., 1] + center_anchors[..., 3] / 2
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
@@ -115,7 +154,27 @@ def IoU(proposals, bboxes):
   # bottom-right corner of proposal and bbox. Think about their relationships. #
   ##############################################################################
   # Replace "pass" statement with your code
-  pass
+  proposals = torch.flatten(proposals, start_dim=1, end_dim=-2)
+  proposals_area = (proposals[..., 2] - proposals[..., 0]) * (proposals[..., 3] - proposals[..., 1])
+
+  bboxes = torch.unsqueeze(bboxes, dim=1)
+  bboxes_area = (bboxes[..., 2] - bboxes[..., 0]) * (bboxes[..., 3] - bboxes[..., 1])
+
+  red_union = (proposals_area.T + bboxes_area.T).T
+
+  proposals = torch.unsqueeze(proposals, dim=2)
+
+  maxs = torch.maximum(bboxes[..., :4], proposals)
+  mins = torch.minimum(bboxes[..., :4], proposals)
+
+  inter_heights = mins[..., 2] - maxs[..., 0]
+  inter_widths = mins[..., 3] - maxs[..., 1]
+  inter_heights[inter_heights < 0] = 0
+  inter_widths[inter_widths < 0] = 0
+  inter_area = inter_heights * inter_widths
+
+  # Compute the IoU, which equals to: Area of Intersection / Area of Union
+  iou_mat = inter_area / (red_union - inter_area)
   ##############################################################################
   #                               END OF YOUR CODE                             #
   ##############################################################################
@@ -142,7 +201,12 @@ class PredictionNetwork(nn.Module):
     # Make sure to name your prediction network pred_layer.
     self.pred_layer = None
     # Replace "pass" statement with your code
-    pass
+    self.pred_layer = torch.nn.Sequential(
+      torch.nn.Conv2d(in_dim, hidden_dim, 1, stride=1),
+      torch.nn.Dropout(drop_ratio),
+      torch.nn.LeakyReLU(),
+      torch.nn.Conv2d(hidden_dim, int(5 * num_anchors + num_classes), 1, stride=1)
+    )
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -239,7 +303,35 @@ class PredictionNetwork(nn.Module):
     # negative anchors specified by pos_anchor_idx and neg_anchor_idx.         #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    B, _, H, W = features.shape
+    A = self.num_anchors
+
+    out_anchors = self.pred_layer(features)
+
+    all_conf_scores = out_anchors[:, 0:5*A:5, ...]
+    all_conf_scores = torch.sigmoid(all_conf_scores)
+
+    all_offsets = out_anchors[:, :5*A, ...]
+    all_offsets = all_offsets.reshape((B, A, 5, H, W))
+    all_offsets = all_offsets[:, :, 1:, ...]
+    all_offsets[:, :, :2, ...] = torch.sigmoid(all_offsets[:, :, :2, ...]) - 0.5
+
+    all_class_scores = out_anchors[:, 5*A:, ...]
+
+    if pos_anchor_idx is not None:  # Training mode.
+      all_conf_scores = all_conf_scores.reshape((B, A, 1, H, W))
+
+      pos_anc_conf = self._extract_anchor_data(all_conf_scores, pos_anchor_idx)
+      neg_anc_conf = self._extract_anchor_data(all_conf_scores, neg_anchor_idx)
+      conf_scores = torch.cat((pos_anc_conf, neg_anc_conf))
+
+      offsets = self._extract_anchor_data(all_offsets, pos_anchor_idx)
+      class_scores = self._extract_class_scores(all_class_scores, pos_anchor_idx)
+
+    else:  # Inference mode.
+      conf_scores = all_conf_scores
+      offsets = all_offsets
+      class_scores = all_class_scores
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -288,7 +380,26 @@ class SingleStageDetector(nn.Module):
     #       (A5-1) for a better performance than with the default value.         #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    batch_size = images.shape[0]
+    features = self.feat_extractor(images)
+
+    grid = GenerateGrid(batch_size)
+    anchors = GenerateAnchor(self.anchor_list, grid)
+
+    iou_mat = IoU(anchors, bboxes)
+    activated_anc_ind, negative_anc_ind, GT_conf_scores, GT_offsets, GT_class, _, _ = \
+        ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, pos_thresh=0.7, 
+                                    neg_thresh=0.2, method='YOLO')
+
+    conf_scores, offsets, class_scores = self.pred_network(features, activated_anc_ind, negative_anc_ind)
+    conf_loss = ConfScoreRegression(conf_scores, GT_conf_scores)
+    reg_loss = BboxRegression(offsets, GT_offsets)
+
+    _, A, H, W, _ = anchors.shape
+    anc_per_img = A * H * W
+    cls_loss = ObjectClassification(class_scores, GT_class, batch_size, anc_per_img, activated_anc_ind)
+
+    total_loss = w_conf * conf_loss + w_reg * reg_loss + w_cls * cls_loss
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -324,7 +435,52 @@ class SingleStageDetector(nn.Module):
     # lists of B 2-D tensors (you may need to unsqueeze dim=1 for the last two). #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    batch_size = images.shape[0]
+
+    # Image feature extraction (using the backbone CNN network).
+    features = self.feat_extractor(images)
+
+    # Grid and anchor generation.
+    grid = GenerateGrid(batch_size)
+    anchors = GenerateAnchor(self.anchor_list, grid)
+
+    B, A, Hp, Wp, _ = anchors.shape
+
+    conf_scores, offsets, class_scores = self.pred_network(features)
+    conf_scores = torch.flatten(conf_scores, start_dim=1)
+
+    offsets = torch.transpose(offsets, 2, 4)
+
+    class_indices = torch.max(class_scores, dim=1)[1]
+    class_indices = class_indices.unsqueeze(1)
+    class_indices = torch.broadcast_to(class_indices, (B, A, Hp, Wp))
+    class_indices = torch.flatten(class_indices, start_dim=1)
+
+    proposals = GenerateProposal(anchors, offsets, method='YOLO')
+    proposals = torch.flatten(proposals, start_dim=1, end_dim=-2)
+
+    final_proposals, final_conf_scores, final_class = [], [], []
+
+    for idx in range(batch_size):
+      cr_proposal = proposals[idx]       
+      cr_conf_scores = conf_scores[idx]  
+      cr_classes = class_indices[idx]   
+
+      del_idx_mask = ~ (cr_conf_scores < thresh)
+
+      cr_conf_scores = cr_conf_scores[del_idx_mask]
+      K = cr_conf_scores.shape[0]
+      cr_classes = cr_classes[del_idx_mask].unsqueeze(1)
+
+      del_idx_mask = del_idx_mask.unsqueeze(1)
+      del_idx_mask = torch.broadcast_to(del_idx_mask, (A*Hp*Wp, 4))
+
+      cr_proposal = cr_proposal[del_idx_mask].reshape(K, 4)
+      icr_proposal = torchvision.ops.nms(cr_proposal, cr_conf_scores, nms_thresh)
+
+      final_proposals.append(cr_proposal[icr_proposal])
+      final_conf_scores.append(cr_conf_scores[icr_proposal].unsqueeze(1))
+      final_class.append(cr_classes[icr_proposal])
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -364,11 +520,36 @@ def nms(boxes, scores, iou_threshold=0.5, topk=None):
   #   github.com/pytorch/vision/blob/master/torchvision/csrc/cpu/nms_cpu.cpp  #
   #############################################################################
   # Replace "pass" statement with your code
-  pass
+  keep = []
+
+  indices = torch.sort(scores, descending=True)[1]
+  boxes = boxes[indices]
+
+  while len(boxes) != 0:
+    keep.append(indices[0])
+    hbox = boxes[0]
+    boxes = boxes[1:]
+    indices = indices[1:]
+
+    hbox = hbox.reshape(1, 1, 4)
+    rboxes = boxes.reshape(1, -1, 1, 1, 4)
+
+    iou_mat = IoU(rboxes, hbox).squeeze()
+
+    del_idx_mask = ~ (iou_mat > iou_threshold)
+
+    indices = indices[del_idx_mask]
+    boxes = boxes[del_idx_mask]
+
+  if topk is not None:
+    keep = keep[:topk]
+
+  keep = torch.tensor(keep)
   #############################################################################
   #                              END OF YOUR CODE                             #
   #############################################################################
   return keep
+
 
 def ConfScoreRegression(conf_scores, GT_conf_scores):
   """
