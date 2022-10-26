@@ -28,7 +28,12 @@ class ProposalModule(nn.Module):
     # Make sure that your region proposal module is called pred_layer
     self.pred_layer = None      
     # Replace "pass" statement with your code
-    pass
+    self.pred_layer = nn.Sequential(
+      nn.Conv2d(in_dim, hidden_dim, kernel_size=3, padding=1),
+      nn.Dropout2d(p=drop_ratio),
+      nn.LeakyReLU(),
+      nn.Conv2d(hidden_dim, self.num_anchors * 6, kernel_size=1)
+    )
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -105,7 +110,33 @@ class ProposalModule(nn.Module):
     # function from the previous notebook.                                     #
     ############################################################################
     # Replace "pass" statement with your code
-    pass
+    out_anchors = self.pred_layer(features)
+    B, _, Hp, Wp = out_anchors.shape
+    A = self.num_anchors
+
+    out_anchors = out_anchors.reshape(B, A, 6, Hp, Wp)
+
+    all_conf_scores = out_anchors[:, :, :2, ...]
+
+    all_offsets = out_anchors[:, :, 2:, ...]
+
+    if mode == 'train':  # Training mode.
+      pos_anc_conf = self._extract_anchor_data(all_conf_scores, pos_anchor_idx)
+      neg_anc_conf = self._extract_anchor_data(all_conf_scores, neg_anchor_idx)
+
+      conf_scores = torch.cat((pos_anc_conf, neg_anc_conf))
+
+      offsets = self._extract_anchor_data(all_offsets, pos_anchor_idx)
+
+      pos_anchor_offsets = offsets.reshape(1, -1, 1, 1, 4)
+      pos_anchor_coord = pos_anchor_coord.reshape(1, -1, 1, 1, 4)
+
+      proposals = GenerateProposal(pos_anchor_coord, pos_anchor_offsets, method='FasterRCNN')
+      proposals = proposals.squeeze()
+
+    elif mode == 'eval':
+      conf_scores = all_conf_scores
+      offsets = all_offsets
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -218,7 +249,26 @@ class RPN(nn.Module):
     #       as positive/negative anchors have been explicitly targeted.          #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    batch_size = images.shape[0]
+
+    features = self.feat_extractor(images)
+
+    grid = GenerateGrid(batch_size)
+    anchors = GenerateAnchor(self.anchor_list, grid)
+    _, A, H, W, _ = anchors.shape
+    anc_per_img = A * H * W
+
+    iou_mat = IoU(anchors, bboxes)
+    pos_anchor_idx, neg_anchor_idx, _, GT_offsets, GT_class, activated_anc_coord, _ = \
+        ReferenceOnActivatedAnchors(anchors, bboxes, grid, iou_mat, method='FasterRCNN')
+
+    conf_scores, offsets, proposals = self.prop_module(features, activated_anc_coord,
+                                                        pos_anchor_idx, neg_anchor_idx)
+
+    conf_loss = ConfScoreRegression(conf_scores, batch_size)
+    reg_loss = BboxRegression(offsets, GT_offsets, batch_size)
+
+    total_loss = w_conf * conf_loss + w_reg * reg_loss
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -272,7 +322,47 @@ class RPN(nn.Module):
     # HINT: Use `torch.no_grad` as context to speed up the computation.          #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    batch_size = images.shape[0]
+
+    with torch.no_grad():
+      features = self.feat_extractor(images)
+
+      grid = GenerateGrid(batch_size)
+      anchors = GenerateAnchor(self.anchor_list, grid)
+
+      _, A, Hp, Wp, _ = anchors.shape
+
+      conf_scores, offsets = self.prop_module(features)
+
+    conf_scores = torch.transpose(conf_scores, 2, 4)
+    conf_scores = torch.flatten(conf_scores, start_dim=1, end_dim=-2)
+    conf_probs = torch.sigmoid(conf_scores)
+    conf_probs = conf_probs[..., 0]
+
+    offsets = torch.transpose(offsets, 2, 4)
+
+    proposals = GenerateProposal(anchors, offsets, method='FasterRCNN')
+    proposals = torch.flatten(proposals, start_dim=1, end_dim=-2)
+
+    final_conf_probs, final_proposals = [], []
+
+    for idx in range(batch_size):
+      cr_proposal = proposals[idx]     
+      cr_conf_probs = conf_probs[idx] 
+
+      del_idx_mask = ~ (cr_conf_probs < thresh)
+
+      cr_conf_probs = cr_conf_probs[del_idx_mask]
+      K = cr_conf_probs.shape[0]
+
+      del_idx_mask = del_idx_mask.unsqueeze(1)
+      del_idx_mask = torch.broadcast_to(del_idx_mask, (A*Hp*Wp, 4))
+
+      cr_proposal = cr_proposal[del_idx_mask].reshape(K, 4)
+      icr_proposal = torchvision.ops.nms(cr_proposal, cr_conf_probs, nms_thresh)
+
+      final_conf_probs.append(cr_conf_probs[icr_proposal].unsqueeze(1))
+      final_proposals.append(cr_proposal[icr_proposal])
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -302,7 +392,14 @@ class TwoStageDetector(nn.Module):
     self.cls_layer = None
 
     # Replace "pass" statement with your code
-    pass
+    self.rpn = RPN()
+
+    self.cls_layer = nn.Sequential(
+      nn.Linear(in_dim, hidden_dim),
+      nn.Dropout(p=drop_ratio),
+      nn.ReLU(),
+      nn.Linear(hidden_dim, num_classes)
+    )
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -336,7 +433,22 @@ class TwoStageDetector(nn.Module):
     #    total_loss = rpn_loss + cls_loss.                                       #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    rpn_loss, _, proposals, features, GT_class, pos_anchor_idx, _, anc_per_img = \
+                                      self.rpn(images, bboxes, output_mode='all')
+
+    im_idx = (pos_anchor_idx // anc_per_img).unsqueeze(1)
+
+    proposals_ibatch = torch.cat((im_idx, proposals), dim=1)
+
+    roi_features = torchvision.ops.roi_align(features, proposals_ibatch,
+                              output_size=(self.roi_output_w, self.roi_output_h))
+    roi_features = torch.mean(roi_features, (2, 3))
+
+    class_prob = self.cls_layer(roi_features)
+
+    cls_loss = nn.functional.cross_entropy(class_prob, GT_class)
+
+    total_loss = rpn_loss + cls_loss
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
@@ -377,7 +489,27 @@ class TwoStageDetector(nn.Module):
     # probabilities from the second-stage network to compute final_class.       #
     ##############################################################################
     # Replace "pass" statement with your code
-    pass
+    final_proposals, final_conf_probs, features = self.rpn.inference(images,
+                          thresh=thresh, nms_thresh=nms_thresh, mode='FasterRCNN')
+
+    final_class = []
+
+    for idx, cr_proposal in enumerate(final_proposals):
+      cr_features = features[idx].unsqueeze(dim=0)
+
+      roi_features = torchvision.ops.roi_align(cr_features, [cr_proposal],
+                                output_size=(self.roi_output_w, self.roi_output_h))
+      roi_features = torch.mean(roi_features, (2, 3))
+
+      with torch.no_grad(): 
+        class_prob = self.cls_layer(roi_features)
+
+      if class_prob.shape[0] == 0:
+        cr_final_class = torch.tensor([], dtype=torch.int32, device='cuda')
+      else: 
+        cr_final_class = torch.argmax(class_prob, dim=1, keepdim=True)
+
+      final_class.append(cr_final_class)
     ##############################################################################
     #                               END OF YOUR CODE                             #
     ##############################################################################
