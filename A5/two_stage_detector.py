@@ -433,14 +433,14 @@ class TwoStageDetector(nn.Module):
     #    total_loss = rpn_loss + cls_loss.                                       #
     ##############################################################################
     # Replace "pass" statement with your code
-    rpn_loss, _, proposals, features, GT_class, pos_anchor_idx, _, anc_per_img = \
+    rpn_loss, _, proposals, out, GT_class, pos_anchor_idx, anc_per_img = \
                                       self.rpn(images, bboxes, output_mode='all')
 
     im_idx = (pos_anchor_idx // anc_per_img).unsqueeze(1)
 
     proposals_ibatch = torch.cat((im_idx, proposals), dim=1)
 
-    roi_features = torchvision.ops.roi_align(features, proposals_ibatch,
+    roi_features = torchvision.ops.roi_align(out, proposals_ibatch,
                               output_size=(self.roi_output_w, self.roi_output_h))
     roi_features = torch.mean(roi_features, (2, 3))
 
